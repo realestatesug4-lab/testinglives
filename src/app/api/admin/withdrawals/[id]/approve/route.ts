@@ -3,7 +3,9 @@ import {
   createMarzPayConfig,
   createServiceRoleClient,
   MarzPayApiError,
+  normalizeMarzPaySettlement,
   PaymentConfigError,
+  readMarzPaySettledAmount,
   requestMarzPay,
 } from "@/lib/server/payments";
 
@@ -85,8 +87,16 @@ export async function POST(
         `transactions/${encodeURIComponent(data.provider_request_id)}`,
         "GET",
       );
+      const normalized = normalizeMarzPaySettlement(statusResponse, "withdraw");
+      if (!normalized) {
+        return Response.json({
+          transactionId: data.transaction_id,
+          status: "processing",
+          message: "MarzPay is still confirming this payout. Check the record again shortly.",
+        }, { status: 202 });
+      }
       const { error: updateError } = await serviceClient.rpc("apply_marzpay_webhook", {
-        p_payload: statusResponse,
+        p_payload: normalized,
       });
       if (updateError) {
         console.error("MarzPay payout status could not be applied.", updateError.message);
@@ -126,9 +136,9 @@ export async function POST(
     const payout = responseData
       ? (isRecord(responseData.withdrawal) ? responseData.withdrawal : isRecord(responseData.disbursement) ? responseData.disbursement : null)
       : null;
-    const payoutAmount = payout && isRecord(payout.amount) ? payout.amount.raw : null;
-    const payoutPhone = payout?.phone_number;
-    const payoutProvider = payout?.provider;
+    const settled = readMarzPaySettledAmount("withdraw", transaction, payout);
+    const payoutPhone = payout?.phone_number ?? transaction?.phone_number;
+    const payoutProvider = payout?.provider ?? transaction?.provider;
     const phoneMatches = payoutPhone == null
       || (typeof payoutPhone === "string" && payoutPhone === data.phone_number);
     const providerMatches = payoutProvider == null
@@ -136,14 +146,17 @@ export async function POST(
     if (
       !providerRequestId
       || transaction?.provider_reference !== data.reference
-      || Number(payoutAmount) !== data.amount
+      || !settled
+      || settled.amount !== data.amount
+      || (settled.currency != null && settled.currency.toUpperCase() !== "UGX")
       || !phoneMatches
       || !providerMatches
     ) {
       console.error("MarzPay payout response did not match the approved request.", {
         hasTransactionId: Boolean(providerRequestId),
         referenceMatches: transaction?.provider_reference === data.reference,
-        amountMatches: Number(payoutAmount) === data.amount,
+        settledAmount: settled?.amount ?? null,
+        expectedAmount: data.amount,
         phoneMatches,
         providerMatches,
       });

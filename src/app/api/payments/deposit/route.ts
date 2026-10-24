@@ -3,7 +3,9 @@ import {
   createMarzPayConfig,
   createServiceRoleClient,
   MarzPayApiError,
+  normalizeMarzPaySettlement,
   PaymentConfigError,
+  readMarzPaySettledAmount,
   requestMarzPay,
 } from "@/lib/server/payments";
 import { detectUgandaMobileProvider, normalizeUgandaPhone } from "@/lib/phone";
@@ -110,8 +112,17 @@ export async function POST(request: Request) {
         `transactions/${encodeURIComponent(data.provider_request_id)}`,
         "GET",
       );
+      const normalized = normalizeMarzPaySettlement(statusResponse, "deposit");
+      if (!normalized) {
+        return Response.json({
+          transactionId: data.transaction_id,
+          status: "processing",
+          promptSent: false,
+          message: "MarzPay is still confirming this deposit. Check Records again shortly.",
+        }, { status: 202 });
+      }
       const { error: updateError } = await serviceClient.rpc("apply_marzpay_webhook", {
-        p_payload: statusResponse,
+        p_payload: normalized,
       });
       if (updateError) {
         console.error("MarzPay deposit status could not be applied.", updateError.message);
@@ -140,15 +151,16 @@ export async function POST(request: Request) {
     const responseData = isRecord(response) && isRecord(response.data) ? response.data : null;
     const transaction = responseData && isRecord(responseData.transaction) ? responseData.transaction : null;
     const collection = responseData && isRecord(responseData.collection) ? responseData.collection : null;
-    const collectionAmount = collection && isRecord(collection.amount) ? collection.amount.raw : null;
+    const settled = readMarzPaySettledAmount("deposit", transaction, collection);
     const transactionId = transaction?.uuid;
     const transactionReference = transaction?.reference;
-    const responsePhone = collection?.phone_number;
-    const responseProvider = collection?.provider;
+    const responsePhone = collection?.phone_number ?? transaction?.phone_number;
+    const responseProvider = collection?.provider ?? transaction?.provider;
     const phoneMatches = responsePhone == null
       || (typeof responsePhone === "string" && responsePhone === data.phone_number);
     const providerMatches = responseProvider == null
       || (typeof responseProvider === "string" && responseProvider.toLowerCase() === data.provider);
+    const currencyMatches = settled?.currency == null || settled.currency.toUpperCase() === "UGX";
     let submissionRecordError: string | null = null;
     if (isUuid(transactionId)) {
       const { error: recordError } = await serviceClient.rpc("record_marzpay_submission", {
@@ -165,14 +177,18 @@ export async function POST(request: Request) {
     if (
       !isUuid(transactionId)
       || transactionReference !== data.reference
-      || Number(collectionAmount) !== data.amount
+      || !settled
+      || settled.amount !== data.amount
+      || !currencyMatches
       || !phoneMatches
       || !providerMatches
     ) {
       console.error("MarzPay collection response did not match the request.", {
         hasTransactionId: typeof transactionId === "string",
         referenceMatches: transactionReference === data.reference,
-        amountMatches: Number(collectionAmount) === data.amount,
+        settledAmount: settled?.amount ?? null,
+        expectedAmount: data.amount,
+        currencyMatches,
         phoneMatches,
         providerMatches,
       });

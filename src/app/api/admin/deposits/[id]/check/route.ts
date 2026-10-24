@@ -3,6 +3,7 @@ import {
   createMarzPayConfig,
   createServiceRoleClient,
   MarzPayApiError,
+  normalizeMarzPaySettlement,
   PaymentConfigError,
   requestMarzPay,
 } from "@/lib/server/payments";
@@ -42,8 +43,12 @@ export async function POST(
       `transactions/${encodeURIComponent(data.provider_request_id)}`,
       "GET",
     );
+    const normalized = normalizeMarzPaySettlement(statusResponse, "deposit");
+    if (!normalized) {
+      return Response.json({ error: "MarzPay returned a status this app cannot interpret yet." }, { status: 502 });
+    }
     const { error: applyError } = await serviceClient.rpc("apply_marzpay_webhook", {
-      p_payload: statusResponse,
+      p_payload: normalized,
     });
     if (applyError) {
       console.error("MarzPay deposit status could not be applied.", applyError.message);

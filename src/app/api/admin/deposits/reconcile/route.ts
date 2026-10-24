@@ -2,6 +2,7 @@ import {
   authenticateRequest,
   createMarzPayConfig,
   createServiceRoleClient,
+  normalizeMarzPaySettlement,
   PaymentConfigError,
   requestMarzPay,
 } from "@/lib/server/payments";
@@ -47,8 +48,10 @@ export async function POST(request: Request) {
           `transactions/${encodeURIComponent(deposit.provider_request_id)}`,
           "GET",
         );
+        const normalized = normalizeMarzPaySettlement(statusResponse, "deposit");
+        if (!normalized) throw new Error("MarzPay returned a status this app cannot interpret yet.");
         const { error: applyError } = await serviceClient.rpc("apply_marzpay_webhook", {
-          p_payload: statusResponse,
+          p_payload: normalized,
         });
         if (applyError) throw new Error(applyError.message);
         updated += 1;
